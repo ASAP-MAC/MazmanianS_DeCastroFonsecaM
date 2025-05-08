@@ -1,0 +1,828 @@
+---
+title: "Microbiome differences in ASO vs WT mice, aged 2 and 5 months"
+subtitle: "Project 1"
+author: "Matheus De Castro Fonseca, Giacomo Antonello, Nicola Segata, Levi Waldron, Sarkis Mazmanian"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    toc_depth: 3
+    code_folding: hide
+    toc_float: true
+    number_sections: true
+    thumbnails: false
+    lightbox: true
+    gallery: false
+    use_bookdown: true
+    highlight: haddock
+params:
+  basic_outdir: "results"
+  microbiome_basic_transform: "RelAbund"
+  tax_level: "SGB"
+  beta_dist: "bray"
+  beta_MDS: "NMDS"
+---
+
+```{r}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+```{r, include=FALSE}
+# packages for tabular data manipulation
+library(tidyverse)
+library(data.table)
+
+# microbiome specific packages
+library(maaslin3)
+library(mia)
+# some packages for data visualization (plots and tables)
+library(miaViz)
+library(pheatmap)
+library(UpSetR)
+library(ggpubr)
+library(kableExtra)
+library(reactable)
+
+# MAC's package to download data
+library(parkinsonsMetagenomicData)
+
+# set ggplot2 plot themes 
+theme_set(theme_light())
+```
+
+# Create output directories all in one chunk
+
+```{r}
+
+output_directories.list <- list(
+  # alpha diversity directory
+  alpha_div_outdir = file.path(params$basic_outdir, "01_alpha_diversity"),
+  # beta diversity output directory
+  beta_div_outdir = file.path(params$basic_outdir, "02_beta_diversity"),
+  # differential abundance temporary directory
+  maaslin_tmpdir = "~/Documents/maaslin3_tmp_results/mazmanian_matheus_proj1",
+  # differential abundance output directory
+  maaslin_outdir = file.path(params$basic_outdir, "03_diff_abund")
+)
+
+tmp_out <- capture.output(sapply(output_directories.list, dir.create, showWarnings = FALSE, recursive = TRUE))
+rm(tmp_out)
+```
+
+```{r}
+# Load data
+metadata_project_1 <- read_tsv("../Data/metadata_v2/metadata_project1.tsv") %>% 
+  # format a few values in the metadata
+  mutate(
+    genotype = factor(genotype, levels = c("WT", "ASO")),
+    cage = as.factor(cage),
+    age.fct = as.factor(`age (months)`),
+    genotype_age = factor(paste(genotype, age.fct, "mos"), levels = c(paste("WT", c(2,5,12), "mos"), paste("ASO", c(2,5), "mos")))
+    )
+rownames(metadata_project_1) <- metadata_project_1$uuid
+
+```
+
+# Prepare data for analysis (run only once)
+
+```{r, eval=FALSE}
+# googleCloudStorageR::gcs_auth(json_file = "~/Downloads/curatedmetagenomicdata-232f4a306d1d.json")
+mpa_files_cache <- cacheMetagenomicData(metadata_project_1$uuid, data_type = "relative_abundance", ask_on_update = FALSE)
+# metaphlan <- get_metaphlan_locators(metadata_project_1$uuid, data_type = "relative_abundance")
+metaphlan_profiles <- loadMetagenomicData(mpa_files_cache)
+
+source("https://raw.githubusercontent.com/g-antonello/biobakeryUtils/refs/heads/main/R/wrangle_metaphlan.R")
+source("https://raw.githubusercontent.com/g-antonello/biobakeryUtils/refs/heads/main/R/complete_unknown_taxonomy.R")
+
+mpa_raw <- cbind(as.data.frame(rowData(metaphlan_profiles)) %>% rownames_to_column("clade_name"), assay(metaphlan_profiles)) %>% as_tibble() %>% select(-additional_species)
+
+dir.create("../Data/metaphlan_profiles/project-1", recursive = TRUE, showWarnings = FALSE)
+write_tsv(mpa_raw, "../Data/metaphlan_profiles/project-1/metaphlan4_data.tsv")
+
+mpa4_wrangled_taxonomy_mpa <- assay(metaphlan_profiles) %>%
+  as.data.frame() %>% 
+  rownames_to_column("clade_name") %>% 
+  wrangle_metaphlan(taxonomic_lvl = params$tax_level)
+
+project1.tse <- TreeSummarizedExperiment(
+  rowData = mpa4_wrangled_taxonomy_mpa$taxonomies,
+  colData = metadata_project_1,
+  assays = list(
+    metaphlan_RelAbund = as.matrix(mpa4_wrangled_taxonomy_mpa$profiles/100),
+    metaphlan_Percent = as.matrix(mpa4_wrangled_taxonomy_mpa$profiles)
+    )
+)
+saveRDS(project1.tse, "../Data/project1.tse.Rds")
+
+```
+
+```{r}
+project1.tse <- readRDS("../Data/project1.tse.Rds")
+project1.tse
+```
+
+# Dataset-wide microbiome composition statistics
+
+## Number of taxa per taxonomic level
+
+```{r}
+splitByRanks(project1.tse) %>% 
+  sapply(nrow) %>% 
+  c(., "SGB" = nrow(project1.tse))
+
+```
+
+## Relative abundance of 30 most abundant bacteria per taxonomic level {.tabset}
+
+```{r}
+tmp <- project1.tse %>% 
+  splitByRanks() %>% 
+  lapply(function(tse){
+    max_n <- nrow(tse)
+    top30MostAbund <- getTop(tse, assay.type = "metaphlan_RelAbund", method = "mean", top = min(c(30, max_n)))
+    tse.subset <- tse[top30MostAbund,]
+    return(tse.subset)
+  })
+  
+```
+
+```{r, results = "asis"}
+
+for (tx in names(tmp)) {
+  # Create header with cat()
+  cat("\n\n###", tx, "\n")
+  
+  # Create plot and convert to plotly
+  p <- miaViz::plotAbundance(tmp[[tx]], 
+                            assay.type = "metaphlan_RelAbund",
+                            group = tx) +
+       facet_grid(cols = vars(genotype_age), scales = "free_x") + 
+    theme(legend.position = "bottom")
+  
+  # Explicitly print plotly object
+  print(p)
+  
+  cat("\n")
+}
+
+```
+
+This is again to show that there are too many taxa to easily visualize them.
+We need to rely on other methods.
+
+## Heatmap all taxa and samples
+
+```{r, fig.cap="Heatmap of full microbiome composition of the dataset. Relative abundances have been Z-scaled by taxon, to account for intrinsic differences in relative abundances in the microbiome"}
+
+pheatmap::pheatmap(assay(project1.tse) %>% magrittr::set_colnames(colData(project1.tse)$sample_name), scale = "row", annotation_col = colData(project1.tse) %>% as.data.frame() %>%  magrittr::set_rownames(.$sample_name) %>% select(genotype, age.fct), angle_col = 315, show_rownames = FALSE)
+
+```
+
+# Alpha richness and diversity vs mouse age and genotype
+
+Formula applied to linear models:
+
+$$
+\alpha\text{-div} \sim genotype \times age(categorical)
+$$
+
+```{r, fig.cap="Histograms of alpha diversity metrics calculated on the full dataset including all genotypes and age groups."}
+project1.tse <- mia::addAlpha(project1.tse, assay.type = "metaphlan_RelAbund", index = c("dbp_dominance", "observed_richness", "shannon_diversity", "gini"))
+lapply(c("dbp_dominance", "observed_richness", "shannon_diversity", "gini"), 
+       function(div) ggplot(as.data.frame(colData(project1.tse)), aes(x = !!sym(div))) + 
+         geom_histogram() + 
+         labs(title = div)
+       ) %>% 
+  ggarrange(plotlist = .)
+```
+
+```{r}
+lm_richness_vs_age <- lm(observed_richness ~ genotype * age.fct, data = as.data.frame(colData(project1.tse)))
+
+table_lm_alpha_richness <- broom::tidy(lm_richness_vs_age)
+
+write_tsv(table_lm_alpha_richness, file.path(output_directories.list$alpha_div_outdir, "observedRichness_linearModel.tsv"))
+```
+
+```{r}
+lm_shannon_vs_age <- lm(shannon_diversity ~ genotype * age.fct, data = as.data.frame(colData(project1.tse)))
+
+table_lm_alpha_div <- broom::tidy(lm_shannon_vs_age)
+
+
+write_tsv(table_lm_alpha_div, file.path(output_directories.list$alpha_div_outdir, "shannon_linearModel.tsv"))
+```
+
+
+```{r, fig.height=7, fig.width=10}
+
+ggarrange(
+ggplot(as.data.frame(colData(project1.tse)), aes(x = age.fct, y = observed_richness, group = mouse_id, color = genotype, label = sample_name)) + 
+         geom_line(show.legend = FALSE) + 
+         geom_point() + 
+  scale_color_manual(values = ggsci::pal_aaas()(5)[c(5,2)]) + 
+  labs(
+    x = "Age (months)",
+    y = "Richness/Diversity",
+    color = "Genotype", 
+    title = "Obs. Richness"
+  ),
+ggpubr::ggtexttable(table_lm_alpha_richness %>% 
+  mutate(
+  p.value = ifelse(p.value < 0.001, format.pval(p.value, scientific = TRUE, digits = 1), as.character(round(p.value, 4)))
+) %>% 
+  mutate_if(is.double, round, 3), rows = NULL),
+ggplot(as.data.frame(colData(project1.tse)), aes(x = age.fct, y = shannon_diversity, group = mouse_id, color = genotype, label=sample_name)) + 
+         geom_line(show.legend = FALSE) + 
+         geom_point() + 
+  scale_color_manual(values = ggsci::pal_aaas()(5)[c(5,2)]) +
+  labs(
+    x = "Age (months)",
+    y = "Richness/Diversity",
+    color = "Genotype", 
+    title = "Shannon diversity"
+  ),
+ggpubr::ggtexttable(table_lm_alpha_div %>% 
+  mutate(
+  p.value = ifelse(p.value < 0.001, format.pval(p.value, scientific = TRUE, digits = 1), as.character(round(p.value, 4)))
+) %>% 
+  mutate_if(is.double, round, 3), rows = NULL),
+common.legend = TRUE, ncol = 2, nrow= 2, labels = "AUTO"
+)
+```
+
+Conclusions from panels **A, B**:
+
+  - ASO mice have a less rich microbiome across all ages (- 21.6 `r params$tax_levels` taxa)
+  - Richness decreases with age, in both genotypes 
+  - ASO mice at age 5 months do not show a dramatically different microbiome
+  composition than ASO at age 2 months.
+
+Conclusions from panels **C, D**:
+
+  - Alpha diversity (Shannon) is not significantly affected by aging and genotype
+  - ASO mice at age 5 months show a slight trend of decreased diversity at age 5
+  months compared to age 2.
+
+Alternatively, we can leave 12 months old mice aside for now and re-do
+the calculations.
+
+```{r, fig.height=7, fig.width=8}
+project1_no_12Months.tse <- project1.tse[, colData(project1.tse)$age.fct != 12]
+
+project1_no_12Months.tse <- addAlpha(project1_no_12Months.tse, assay.type = "metaphlan_RelAbund", index = c("observed_richness", "shannon_diversity"))
+
+plot1a <- ggplot(as.data.frame(colData(project1_no_12Months.tse)), aes(x = age.fct, y = observed_richness, color = genotype)) + 
+  geom_point(position = position_jitterdodge(jitter.width = 0.2)) +
+  geom_boxplot(show.legend = FALSE, outliers = FALSE, alpha = 0.5) + 
+  scale_color_manual(values = ggsci::pal_aaas()(5)[c(5,2)]) +
+  labs(
+    x = "Age (months)",
+    y = "Richness/diversity",
+    color = "Genotype",
+    title = "Observed Richness"
+  )
+
+plot1b <- ggplot(as.data.frame(colData(project1_no_12Months.tse)), aes(x = genotype, y = observed_richness, color = age.fct)) + 
+  geom_point(position = position_jitterdodge(jitter.width = 0.2)) +
+  geom_boxplot(show.legend = FALSE, outliers = FALSE,  fill = "transparent") + 
+  scale_color_manual(values = c("skyblue", "steelblue4")) +
+  labs(
+    x = "Genotype",
+    y = "Richness/diversity",
+    color = "Age (months)", 
+    title = "Observed Richness"
+  )
+
+plot2a <- ggplot(as.data.frame(colData(project1_no_12Months.tse)), aes(x = age.fct, y = shannon_diversity, color = genotype)) + 
+  geom_point(position = position_jitterdodge(jitter.width = 0.2)) +
+  geom_boxplot(show.legend = FALSE, outliers = FALSE, alpha = 0.5) + 
+  scale_color_manual(values = ggsci::pal_aaas()(5)[c(5,2)]) +
+  labs(
+    x = "Age (months)",
+    y = "Richness/diversity",
+    color = "Genotype",
+    title = "Shannon Diversity"
+  )
+
+plot2b <- ggplot(as.data.frame(colData(project1_no_12Months.tse)), aes(x = genotype, y = shannon_diversity, color = age.fct)) + 
+  geom_point(position = position_jitterdodge(jitter.width = 0.2)) +
+  geom_boxplot(show.legend = FALSE, outliers = FALSE,  fill = "transparent") + 
+  scale_color_manual(values = c("skyblue", "steelblue4")) +
+  labs(
+    x = "Genotype",
+    y = "Richness/diversity",
+    color = "Age (months)", 
+    title = "Shannon diversity"
+  )
+
+ggarrange(
+  ggarrange(plot1a, plot2a, nrow = 1, common.legend = TRUE, labels = LETTERS[1:2]), 
+  ggarrange(plot1b, plot2b, nrow = 1, common.legend = T, labels = LETTERS[3:4]), 
+  nrow = 2)
+```
+
+From this plot it is visible that there are two groups off 2-months old 
+mice with two distinct **Shannon diversity** indices. Cage effects cannot be, 
+since they are cohoused all together. 
+
+```{r}
+colData(project1.tse) %>% 
+  as_tibble()  %>% 
+  filter(age..months. == 5) %>% 
+  group_by(cage, genotype) %>% 
+  tally() %>% 
+  kbl() %>% 
+  kable_styling()
+```
+
+Is there something else? What is the 
+gender of these animals?
+
+# Beta diversity
+
+First plot will be the beta diversity. We will use the `r params$distance` 
+followed by `r params$beta_MDS`.
+
+```{r}
+
+dimRedName <- paste(params$beta_dist, "mds", sep = "_")
+# this will work once mia or TreeSummarizedExperiment fixes some things
+project1.tse <- mia::addMDS(
+  project1.tse,
+  assay.type = "metaphlan_RelAbund",
+  method = params$beta_dist,
+  ncomponents = 3, name = dimRedName
+  )
+
+project1_meta_with_MDS.df <- cbind.data.frame(as.data.frame(colData(project1.tse)), reducedDim(project1.tse, dimRedName) %>% as.data.frame() %>% set_names(paste("MDS", 1:ncol(.))))
+
+project1_meta_with_MDS.df %>% 
+
+ggplot(aes(x = `MDS 1`, y = `MDS 2`, color = genotype_age)) + 
+  geom_point() + 
+  scale_color_manual(values = c("skyblue", "skyblue2", "skyblue4", "firebrick1", "firebrick4")) + 
+  stat_ellipse()
+```
+
+```{r}
+distance_matrix <- vegan::vegdist(t(assay(project1.tse, "metaphlan_RelAbund")), method = params$beta_dist)
+
+adonis_permanova <- vegan::adonis2(distance_matrix ~ genotype + age.fct, data  = project1_meta_with_MDS.df, permutations = 1000, by = "margin")
+
+```
+
+```{r}
+# test for dispersity with age as factor
+
+betadisper_age <- vegan::permutest(vegan::betadisper(d = distance_matrix, group = project1_meta_with_MDS.df$age.fct), permutations = 999) 
+```
+
+```{r}
+# test for dispersity with genotype as factor
+
+betadisper_genotype <- vegan::permutest(vegan::betadisper(d = distance_matrix, group = project1_meta_with_MDS.df$genotype), permutations = 999)
+```
+
+
+```{r}
+adonis_permanova.df <- broom::tidy(adonis_permanova) %>% dplyr::rename(permanova_p.value = p.value)
+adonis_permanova.df$betadisper_p.value <- NA
+adonis_permanova.df[adonis_permanova.df$term == "genotype",]$betadisper_p.value <- betadisper_genotype$tab$`Pr(>F)`[1]
+adonis_permanova.df[adonis_permanova.df$term == "age.fct",]$betadisper_p.value <- betadisper_age$tab$`Pr(>F)`[1]
+
+write_tsv(adonis_permanova.df, file = file.path(output_directories.list$beta_div_outdir, paste(params$beta_dist, "adonisPermanova", "age", "genotype.tsv", sep = "_")))
+```
+
+Age has a significant dispersity, meaning that the within-group variability 
+is high. PERMANOVA results, seen above, should treated with care, as its significance
+can be fully trusted only if this second test is not significant. 
+
+```{r}
+kbl(adonis_permanova.df) %>% 
+  kable_styling()
+```
+
+# Differential prevalence and abundance (Maaslin3)
+
+```{r, include=FALSE}
+project1_no_12Months.tse <- project1.tse[, colData(project1.tse)$age.fct != 12]
+colData(project1_no_12Months.tse)$age.fct <- droplevels(colData(project1_no_12Months.tse)$age.fct)
+
+diff_abund_age_genotype_no12mo <- maaslin3(
+  input_data = t(assay(project1_no_12Months.tse, "metaphlan_RelAbund")),
+  input_metadata =  as.data.frame(colData(project1_no_12Months.tse)),
+  formula = ~ age.fct + genotype, 
+  output = output_directories.list$maaslin_tmpdir, 
+  min_prevalence = 0.05, 
+  transform = "LOG"
+)
+
+diff_abund_age_genotype_no12mo_clean <- list(abundance = diff_abund_age_genotype_no12mo$fit_data_abundance$results, prevalence = diff_abund_age_genotype_no12mo$fit_data_prevalence$results) %>% 
+  lapply(function(x) {
+    taxonomy_info <- as.data.frame(rowData(project1_no_12Months.tse))
+    taxonomy_info_subset <- taxonomy_info[,1:which(colnames(taxonomy_info) == params$tax_level)]
+    colnames(taxonomy_info_subset)[ncol(taxonomy_info_subset)] <- "feature"
+    
+    return(dplyr::full_join(taxonomy_info_subset, x, by = "feature"))}
+    )
+
+# write results for age
+
+write_tsv(diff_abund_age_genotype_no12mo_clean$prevalence %>% filter(grepl("age", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_PREVAL_age5.vs.age2_ASOandWT.tsv"))
+write_tsv(diff_abund_age_genotype_no12mo_clean$abundance %>% filter(grepl("age", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_ABUND_age5.vs.age2_ASOandWT.tsv"))
+# write results for genotypes
+write_tsv(diff_abund_age_genotype_no12mo_clean$prevalence %>% filter(grepl("genotype", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_PREVAL_ASO.vs.WT_age5and2.tsv"))
+write_tsv(diff_abund_age_genotype_no12mo_clean$abundance %>% filter(grepl("genotype", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_ABUND_ASO.vs.WT_age5and2.tsv"))
+```
+
+## Differentially abundant `r params$tax_level` at 5 months compared to 2 months
+
+Definition of differentially abundant: $\text{Q-value}_{BH} < 0.1$
+
+```{r, fig.width=8, fig.height=12}
+prevalence_plot <- diff_abund_age_genotype_no12mo_clean$prevalence %>% 
+  filter(grepl("age", metadata), qval_individual < 0.1)
+
+volcano_prevalence <- ggplot(data = diff_abund_age_genotype_no12mo_clean$prevalence, mapping = aes(x = coef, y = -log10(qval_individual), color = qval_individual < 0.1)) + 
+  geom_point(show.legend = FALSE) + 
+  geom_hline(yintercept = -log10(0.1), color = 'gray40', lty = "dashed") + 
+  scale_color_manual(values = c("lightgray", "gold3")) + 
+  ggrepel::geom_text_repel(
+    data = rbind.data.frame(diff_abund_age_genotype_no12mo_clean$prevalence %>% 
+                              filter(qval_individual < 0.1) %>% 
+                              arrange(desc(coef)) %>% head(5), 
+                            diff_abund_age_genotype_no12mo_clean$prevalence %>% 
+                              filter(qval_individual < 0.1) %>% 
+                              arrange(coef) %>% head(5)), mapping = aes(x = coef, y = -log10(qval_individual), color = qval_individual < 0.1, label = Species), show.legend = FALSE) + 
+  labs(
+    x = expression(Maaslin3~Eff.~Size),
+    y = expression(-log[10](Q-Value)),
+    title = "5 months vs 2 months ASO and WT",
+    subtitle = "Maaslin3 differential prevalence"
+  )
+
+volcano_abundance <- ggplot(data = diff_abund_age_genotype_no12mo_clean$abundance, mapping = aes(x = coef, y = -log10(qval_individual), color = qval_individual < 0.1)) + 
+  geom_point(show.legend = FALSE) + 
+  geom_hline(yintercept = -log10(0.1), color = 'gray40', lty = "dashed") + 
+  scale_color_manual(values = c("lightgray", "navy")) + 
+  ggrepel::geom_text_repel(
+    data = rbind.data.frame(diff_abund_age_genotype_no12mo_clean$abundance %>% 
+                              filter(qval_individual < 0.1) %>% 
+                              arrange(desc(coef)) %>% head(5), 
+                            diff_abund_age_genotype_no12mo_clean$abundance %>% 
+                              filter(qval_individual < 0.1) %>% 
+                              arrange(coef) %>% head(5)), mapping = aes(x = coef, y = -log10(qval_individual), color = qval_individual < 0.1, label = Species), show.legend = FALSE) + 
+  labs(
+    x = expression(Maaslin3~Eff.~Size),
+    y = expression(-log[10](Q-Value)),
+    title = "5 months vs 2 months ASO and WT",
+    subtitle = "Maaslin3 differential abundance"
+  )
+
+ggarrange(volcano_prevalence, volcano_abundance, nrow = 2)
+```
+
+Many of the taxa that are found differentially represented (prevalent and/or 
+abundant) are non-annotated SGBs, not even at the genus level. This could be an 
+interesting finding.
+
+```{r}
+age_prevalence_top20 <- diff_abund_age_genotype_no12mo_clean$prevalence %>% 
+    filter(grepl("age", metadata), qval_individual < 0.1) %>% 
+    arrange(desc(abs(coef))) %>% 
+    head(20)
+
+age_abundance_top20 <- diff_abund_age_genotype_no12mo_clean$abundance %>% 
+    filter(grepl("age", metadata), qval_individual < 0.1) %>% 
+    arrange(desc(abs(coef))) %>% 
+    head(20)
+```
+
+Below is a select list of top 20 taxa with strongest differential prevalence
+effect sizes in mice aged 5 vs aged 2, adjusting for 
+genotype as a fixed effect.
+
+```{r}
+age_prevalence_top20 %>% 
+  select(Phylum, Class, Family, Species, feature, coef, qval_individual, N, N_not_zero) %>% 
+  mutate(alsoDiffAbundant = ifelse(feature %in% age_abundance_top20$feature, "yes", "no")) %>% 
+  reactable(searchable = TRUE, resizable = TRUE, sortable = TRUE)
+```
+
+```{r, fig.cap = "Plot of first 2 highest and lowest features' coefficients that report differences in prevalence prevalent in mice age 5 months vs 2 months ASO and WT. Mice were further split by genotype on the x axis. relative abundances were log2 transformed and a pseudocount of 1 was added to avoid `-Inf` log error with 0."}
+
+topFeatures <- c(
+  age_prevalence_top20 %>% arrange(coef) %>% .$feature %>% head(2),
+  age_prevalence_top20 %>% arrange(coef) %>% .$feature %>% tail(2))
+
+lapply(topFeatures, function(feat)
+  project1.tse %>% meltSE(
+    assay.type = "metaphlan_RelAbund",
+    add_col_data = c("genotype", "age.fct")
+  ) %>%
+    filter(age.fct !=  12, FeatureID == feat) %>%
+    ggplot(aes(
+      x = genotype,
+      y = log2(metaphlan_RelAbund + 1),
+      color = age.fct
+    )) +
+    scale_color_manual(values = c("skyblue", "steelblue4")) +
+    geom_boxplot() +
+    labs(
+      y = expression(log[2](Rel.~Ab. + 1)),
+      title = feat,
+      caption = paste("logistic eff. size:", round(age_prevalence_top20$coef[age_prevalence_top20$feature == feat], digits = 3))
+    )
+  ) %>%
+  ggarrange(plotlist = ., labels = "AUTO", common.legend = TRUE)
+```
+
+Below is a select list of top 20 taxa with strongest differential abundance
+effect sizes in mice aged 5 vs aged 2, adjusting for 
+genotype as a fixed effect.
+
+```{r}
+age_abundance_top20 %>% 
+  select(Phylum, Class, Family, Species, feature, coef, qval_individual, N, N_not_zero) %>% 
+  mutate(alsoDiffAbundant = ifelse(feature %in% age_abundance_top20$feature, "yes", "no")) %>% 
+  reactable(searchable = TRUE, resizable = TRUE, sortable = TRUE)
+```
+
+```{r, fig.cap = "Plot of first 2 highest and lowest features' coefficients that report differences in abundance prevalent in mice age 5 months vs 2 months ASO and WT. Mice were further split by genotype on the x axis. relative abundances were log2 transformed and a pseudocount of 1 was added to avoid `-Inf` log error with 0."}
+
+topFeatures <- c(
+  age_abundance_top20 %>% arrange(coef) %>% .$feature %>% head(2),
+  age_abundance_top20 %>% arrange(coef) %>% .$feature %>% tail(2))
+
+lapply(topFeatures, function(feat)
+  project1.tse %>% meltSE(
+    assay.type = "metaphlan_RelAbund",
+    add_col_data = c("genotype", "age.fct")
+  ) %>%
+    filter(age.fct !=  12, FeatureID == feat) %>%
+    ggplot(aes(
+      x = genotype,
+      y = log2(metaphlan_RelAbund + 1),
+      color = age.fct
+    )) +
+    scale_color_manual(values = c("skyblue", "steelblue4")) +
+    geom_boxplot() +
+    labs(
+      y = expression(log[2](Rel.~Ab. + 1)),
+      title = feat,
+      caption = paste("lm eff. size:", round(age_abundance_top20$coef[age_abundance_top20$feature == feat], digits = 3))
+    )
+  ) %>%
+  ggarrange(plotlist = ., labels = "AUTO", common.legend = TRUE)
+```
+
+## Differentially abundant `r params$tax_level` in ASO mice compared to WT
+
+Definition of differentially abundant: $\text{Q-value}_{BH} < 0.1$
+
+```{r, fig.width=8, fig.height=12}
+prevalence_plot <- diff_abund_age_genotype_no12mo_clean$prevalence %>% 
+  filter(grepl("genotype", metadata), qval_individual < 0.1)
+
+volcano_prevalence <- ggplot(data = diff_abund_age_genotype_no12mo_clean$prevalence, mapping = aes(x = coef, y = -log10(qval_individual), color = qval_individual < 0.1)) + 
+  geom_point(show.legend = FALSE) + 
+  geom_hline(yintercept = -log10(0.1), color = 'gray40', lty = "dashed") + 
+  scale_color_manual(values = c("lightgray", "gold3")) + 
+  ggrepel::geom_text_repel(
+    data = rbind.data.frame(diff_abund_age_genotype_no12mo_clean$prevalence %>% 
+                              filter(qval_individual < 0.1) %>% 
+                              arrange(desc(coef)) %>% head(5), 
+                            diff_abund_age_genotype_no12mo_clean$prevalence %>% 
+                              filter(qval_individual < 0.1) %>% 
+                              arrange(coef) %>% head(5)), mapping = aes(x = coef, y = -log10(qval_individual), color = qval_individual < 0.1, label = Species), show.legend = FALSE) + 
+  labs(
+    x = expression(Maaslin3~Eff.~Size),
+    y = expression(-log[10](Q-Value)),
+    title = "ASO vs WT aged 2 to 5 months",
+    subtitle = "Maaslin3 differential prevalence"
+  )
+
+volcano_abundance <- ggplot(data = diff_abund_age_genotype_no12mo_clean$abundance, mapping = aes(x = coef, y = -log10(qval_individual), color = qval_individual < 0.1)) + 
+  geom_point(show.legend = FALSE) + 
+  geom_hline(yintercept = -log10(0.1), color = 'gray40', lty = "dashed") + 
+  scale_color_manual(values = c("lightgray", "navy")) + 
+  ggrepel::geom_text_repel(
+    data = rbind.data.frame(diff_abund_age_genotype_no12mo_clean$abundance %>% 
+                              filter(qval_individual < 0.1) %>% 
+                              arrange(desc(coef)) %>% head(5), 
+                            diff_abund_age_genotype_no12mo_clean$abundance %>% 
+                              filter(qval_individual < 0.1) %>% 
+                              arrange(coef) %>% head(5)), mapping = aes(x = coef, y = -log10(qval_individual), color = qval_individual < 0.1, label = Species), show.legend = FALSE) + 
+  labs(
+    x = expression(Maaslin3~Eff.~Size),
+    y = expression(-log[10](Q-Value)),
+    title = "ASO vs WT aged 2 to 5 months",
+    subtitle = "Maaslin3 differential abundance"
+  )
+
+ggarrange(volcano_prevalence, volcano_abundance, nrow = 2)
+```
+
+Many of the taxa that are found differentially represented (prevalent and/or 
+abundant) are non-annotated SGBs, not even at the genus level. This could be an 
+interesting finding.
+
+```{r}
+genotype_prevalence_top20 <- diff_abund_age_genotype_no12mo_clean$prevalence %>% 
+    filter(grepl("genotype", metadata), qval_individual < 0.1) %>% 
+    arrange(desc(abs(coef))) %>% 
+    head(20)
+
+genotype_abundance_top20 <- diff_abund_age_genotype_no12mo_clean$abundance %>% 
+    filter(grepl("genotype", metadata), qval_individual < 0.1) %>% 
+    arrange(desc(abs(coef))) %>% 
+    head(20)
+```
+
+Below is a select list of top 20 taxa with strongest differential prevalence
+effect sizes in mice genotyped 5 vs genotyped 2, adjusting for 
+genotype as a fixed effect.
+
+```{r}
+genotype_prevalence_top20 %>% 
+  select(Phylum, Class, Family, Species, feature, coef, qval_individual, N, N_not_zero) %>% 
+  mutate(alsoDiffAbundant = ifelse(feature %in% genotype_abundance_top20$feature, "yes", "no")) %>% 
+  reactable(searchable = TRUE, resizable = TRUE, sortable = TRUE)
+```
+
+```{r, fig.cap = "Plot of first 2 highest and lowest features' coefficients that report differences in prevalence prevalent in mice genotype ASO vs WT aged 2 to 5 months. Mice were further split by genotype on the x axis. relative abundances were log2 transformed and a pseudocount of 1 was added to avoid `-Inf` log error with 0."}
+
+topFeatures <- c(
+  genotype_prevalence_top20 %>% arrange(coef) %>% .$feature %>% head(2),
+  genotype_prevalence_top20 %>% arrange(coef) %>% .$feature %>% tail(2))
+
+lapply(topFeatures, function(feat)
+  project1.tse %>% meltSE(
+    assay.type = "metaphlan_RelAbund",
+    add_col_data = c("genotype", "age.fct")
+  ) %>%
+    filter(age.fct !=  12, FeatureID == feat) %>%
+    ggplot(aes(
+      x = age.fct,
+      y = log2(metaphlan_RelAbund + 1),
+      color = genotype
+    )) +
+    scale_color_manual(values = ggsci::pal_aaas()(5)[c(5,2)]) +
+    geom_boxplot() +
+    labs(
+      y = expression(log[2](Rel.~Ab. + 1)),
+      title = feat,
+      caption = paste("logistic eff. size:", round(genotype_prevalence_top20$coef[genotype_prevalence_top20$feature == feat], digits = 3))
+    )
+  ) %>%
+  ggarrange(plotlist = ., labels = "AUTO", common.legend = TRUE)
+```
+
+Below is a select list of top 20 taxa with strongest differential abundance
+effect sizes in mice genotyped 5 vs genotyped 2, adjusting for 
+genotype as a fixed effect.
+
+```{r}
+genotype_abundance_top20 %>% 
+  select(Phylum, Class, Family, Species, feature, coef, qval_individual, N, N_not_zero) %>% 
+  mutate(alsoDiffAbundant = ifelse(feature %in% genotype_abundance_top20$feature, "yes", "no")) %>% 
+  reactable(searchable = TRUE, resizable = TRUE, sortable = TRUE)
+```
+
+```{r, fig.cap = "Plot of first 2 highest and lowest features' coefficients that report differences in abundance prevalent in mice genotype ASO vs WT aged 2 to 5 months. Mice were further split by genotype on the x axis. relative abundances were log2 transformed and a pseudocount of 1 was added to avoid `-Inf` log error with 0."}
+
+topFeatures <- c(
+  genotype_abundance_top20 %>% arrange(coef) %>% .$feature %>% head(2),
+  genotype_abundance_top20 %>% arrange(coef) %>% .$feature %>% tail(2))
+
+lapply(topFeatures, function(feat)
+  project1.tse %>% meltSE(
+    assay.type = "metaphlan_RelAbund",
+    add_col_data = c("genotype", "age.fct")
+  ) %>%
+    filter(age.fct !=  12, FeatureID == feat) %>%
+    ggplot(aes(
+      x = age.fct,
+      y = log2(metaphlan_RelAbund + 1),
+      color = genotype
+    )) +
+    scale_color_manual(values = ggsci::pal_aaas()(5)[c(5,2)]) +
+    geom_boxplot() +
+    labs(
+      y = expression(log[2](Rel.~Ab. + 1)),
+      title = feat,
+      caption = paste("lm eff. size:", round(genotype_abundance_top20$coef[genotype_abundance_top20$feature == feat], digits = 3))
+    )
+  ) %>%
+  ggarrange(plotlist = ., labels = "AUTO", common.legend = TRUE)
+```
+
+## Which taxa are different between ASO and WT?
+
+
+```{r, include=FALSE}
+project1_2months.tse <- project1.tse[, colData(project1.tse)$age.fct == 2]
+colData(project1_2months.tse)$age.fct <- droplevels(colData(project1_2months.tse)$age.fct)
+
+diff_abund_ASO.vs.WT_age2 <- maaslin3(
+  input_data = t(assay(project1_2months.tse, "metaphlan_RelAbund")),
+  input_metadata =  as.data.frame(colData(project1_2months.tse)),
+  formula = ~ genotype, 
+  output = output_directories.list$maaslin_tmpdir, 
+  min_prevalence = 0.05, 
+  transform = "LOG"
+)
+
+diff_abund_ASO.vs.WT_age2_clean <- list(abundance = diff_abund_ASO.vs.WT_age2$fit_data_abundance$results, prevalence = diff_abund_ASO.vs.WT_age2$fit_data_prevalence$results) %>% 
+  lapply(function(x) {
+    taxonomy_info <- as.data.frame(rowData(project1_2months.tse))
+    taxonomy_info_subset <- taxonomy_info[,1:which(colnames(taxonomy_info) == params$tax_level)]
+    colnames(taxonomy_info_subset)[ncol(taxonomy_info_subset)] <- "feature"
+    
+    return(dplyr::full_join(taxonomy_info_subset, x, by = "feature"))}
+    )
+
+# write results for age
+
+write_tsv(diff_abund_ASO.vs.WT_age2_clean$prevalence %>% filter(grepl("age", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_PREVAL_ASO.vs.WT_age2.tsv"))
+write_tsv(diff_abund_ASO.vs.WT_age2_clean$abundance %>% filter(grepl("age", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_ABUND_ASO.vs.WT_age2.tsv"))
+
+```
+
+```{r, include=FALSE}
+project1_5months.tse <- project1.tse[, colData(project1.tse)$age.fct == 5]
+colData(project1_5months.tse)$age.fct <- droplevels(colData(project1_5months.tse)$age.fct)
+
+diff_abund_ASO.vs.WT_age5 <- maaslin3(
+  input_data = t(assay(project1_5months.tse, "metaphlan_RelAbund")),
+  input_metadata =  as.data.frame(colData(project1_5months.tse)),
+  formula = ~ genotype, 
+  output = output_directories.list$maaslin_tmpdir, 
+  min_prevalence = 0.05, 
+  transform = "LOG"
+)
+
+diff_abund_ASO.vs.WT_age5_clean <- list(abundance = diff_abund_ASO.vs.WT_age5$fit_data_abundance$results, prevalence = diff_abund_ASO.vs.WT_age5$fit_data_prevalence$results) %>% 
+  lapply(function(x) {
+    taxonomy_info <- as.data.frame(rowData(project1_5months.tse))
+    taxonomy_info_subset <- taxonomy_info[,1:which(colnames(taxonomy_info) == params$tax_level)]
+    colnames(taxonomy_info_subset)[ncol(taxonomy_info_subset)] <- "feature"
+    
+    return(dplyr::full_join(taxonomy_info_subset, x, by = "feature"))}
+    )
+
+# write results for age
+
+write_tsv(diff_abund_ASO.vs.WT_age5_clean$prevalence %>% filter(grepl("age", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_PREVAL_ASO.vs.WT_age5.tsv"))
+write_tsv(diff_abund_ASO.vs.WT_age5_clean$abundance %>% filter(grepl("age", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_ABUND_ASO.vs.WT_age5.tsv"))
+
+```
+
+```{r, fig.cap="UpSet plot showing the intersection of significant taxa across several ways to rule out the age effect in determining the different taxa between ASO and WT mice. 'AgeAdjust' refers to the model with mice aged 2 and 5 months adjusting for age. The remaining 2 sets refer to differential abudance performed on mice aged only 2 or 5 months old. Significance was defined as FDR Q-value less than 0.1."}
+
+diff_abund_signif_ASO.vs.WT.list <- list(
+  "AgeAdjust" = signif_taxa_ASO.vs.WT_allAges <- diff_abund_age_genotype_no12mo$fit_data_abundance$results %>% filter(grepl("genotype", metadata), qval_individual < 0.1),
+  "Age 5 mos" = signif_taxa_ASO.vs.WT_age5 <- diff_abund_ASO.vs.WT_age5$fit_data_abundance$results %>% filter(grepl("genotype", metadata), qval_individual < 0.1),
+  "Age 2 mos" = signif_taxa_ASO.vs.WT_age2 <- diff_abund_ASO.vs.WT_age2$fit_data_abundance$results %>% filter(grepl("genotype", metadata), qval_individual < 0.1)
+)
+
+
+upset(
+  fromList(
+    lapply(
+      diff_abund_signif_ASO.vs.WT.list, "[[", "feature"
+      )
+    )
+  )
+```
+
+```{r, eval=FALSE}
+intersectMatrix <- lapply(names(diff_abund_signif_ASO.vs.WT.list), function(nm){
+  tmp <- select(diff_abund_signif_ASO.vs.WT.list[[nm]], feature)
+  tmp[[nm]] <- 1
+  return(tmp)
+}) %>%
+  purrr::reduce(full_join, by = "feature") %>%
+  column_to_rownames("feature") %>%
+  as.matrix()
+
+intersectMatrix[is.na(intersectMatrix)] <- 0
+
+kbl(intersectMatrix) %>% 
+  kable_styling()
+```
+
+# Next steps
+
+  - Some overlap in beta-diversity and heatmap. Do mice with microbiomes closer to WT show better motor performances?
+  - Which mice were littermates 
+  - What to do with WT aged 12 months?
+  - ...
+  
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
