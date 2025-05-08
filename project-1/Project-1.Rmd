@@ -128,9 +128,18 @@ project1.tse
 ```{r}
 splitByRanks(project1.tse) %>% 
   sapply(nrow) %>% 
-  c(., "SGB" = nrow(project1.tse))
+  c(., "SGB" = nrow(project1.tse)) 
 
 ```
+
+## Prevalence distribution of each taxon
+
+```{r}
+splitByRanks(project1.tse) %>% 
+  lapply(assay) %>% 
+  lapply(apply, 1, function(x) sum(x > 0)) %>% lapply(summary)
+```
+
 
 ## Relative abundance of 30 most abundant bacteria per taxonomic level {.tabset}
 
@@ -367,20 +376,20 @@ ggplot(aes(x = `MDS 1`, y = `MDS 2`, color = genotype_age)) +
 
 ```{r}
 distance_matrix <- vegan::vegdist(t(assay(project1.tse, "metaphlan_RelAbund")), method = params$beta_dist)
-
+set.seed(1234)
 adonis_permanova <- vegan::adonis2(distance_matrix ~ genotype + age.fct, data  = project1_meta_with_MDS.df, permutations = 1000, by = "margin")
 
 ```
 
 ```{r}
 # test for dispersity with age as factor
-
+set.seed(1234)
 betadisper_age <- vegan::permutest(vegan::betadisper(d = distance_matrix, group = project1_meta_with_MDS.df$age.fct), permutations = 999) 
 ```
 
 ```{r}
 # test for dispersity with genotype as factor
-
+set.seed(1234)
 betadisper_genotype <- vegan::permutest(vegan::betadisper(d = distance_matrix, group = project1_meta_with_MDS.df$genotype), permutations = 999)
 ```
 
@@ -745,8 +754,8 @@ diff_abund_ASO.vs.WT_age2_clean <- list(abundance = diff_abund_ASO.vs.WT_age2$fi
 
 # write results for age
 
-write_tsv(diff_abund_ASO.vs.WT_age2_clean$prevalence %>% filter(grepl("age", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_PREVAL_ASO.vs.WT_age2.tsv"))
-write_tsv(diff_abund_ASO.vs.WT_age2_clean$abundance %>% filter(grepl("age", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_ABUND_ASO.vs.WT_age2.tsv"))
+write_tsv(diff_abund_ASO.vs.WT_age2_clean$prevalence %>% filter(grepl("genotype", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_PREVAL_ASO.vs.WT_age2.tsv"))
+write_tsv(diff_abund_ASO.vs.WT_age2_clean$abundance %>% filter(grepl("genotype", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_ABUND_ASO.vs.WT_age2.tsv"))
 
 ```
 
@@ -774,8 +783,8 @@ diff_abund_ASO.vs.WT_age5_clean <- list(abundance = diff_abund_ASO.vs.WT_age5$fi
 
 # write results for age
 
-write_tsv(diff_abund_ASO.vs.WT_age5_clean$prevalence %>% filter(grepl("age", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_PREVAL_ASO.vs.WT_age5.tsv"))
-write_tsv(diff_abund_ASO.vs.WT_age5_clean$abundance %>% filter(grepl("age", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_ABUND_ASO.vs.WT_age5.tsv"))
+write_tsv(diff_abund_ASO.vs.WT_age5_clean$prevalence %>% filter(grepl("genotype", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_PREVAL_ASO.vs.WT_age5.tsv"))
+write_tsv(diff_abund_ASO.vs.WT_age5_clean$abundance %>% filter(grepl("genotype", metadata)), file.path(output_directories.list$maaslin_outdir, "maaslin3_ABUND_ASO.vs.WT_age5.tsv"))
 
 ```
 
