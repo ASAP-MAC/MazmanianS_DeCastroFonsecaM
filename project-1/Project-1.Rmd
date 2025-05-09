@@ -71,7 +71,7 @@ rm(tmp_out)
 
 ```{r}
 # Load metadata
-metadata_project_1 <- read_tsv("../Data/metadata_v2/metadata_project1.tsv") %>% 
+metadata_project_1 <- read_tsv("../Data/metadata_v4/metadata_project1.tsv") %>% 
   # format a few values in the metadata
   mutate(
     genotype = factor(genotype, levels = c("WT", "ASO")),
