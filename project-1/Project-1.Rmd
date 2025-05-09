@@ -70,7 +70,7 @@ rm(tmp_out)
 ```
 
 ```{r}
-# Load data
+# Load metadata
 metadata_project_1 <- read_tsv("../Data/metadata_v2/metadata_project1.tsv") %>% 
   # format a few values in the metadata
   mutate(
@@ -86,7 +86,11 @@ rownames(metadata_project_1) <- metadata_project_1$uuid
 # Prepare data for analysis (run only once)
 
 ```{r, eval=FALSE}
-# googleCloudStorageR::gcs_auth(json_file = "~/Downloads/curatedmetagenomicdata-232f4a306d1d.json")
+
+googleCloudStorageR::gcs_auth(json_file = "~/Downloads/curatedmetagenomicdata-232f4a306d1d.json")
+
+# METAPHLAN4
+
 mpa_files_cache <- cacheMetagenomicData(metadata_project_1$uuid, data_type = "relative_abundance", ask_on_update = FALSE)
 # metaphlan <- get_metaphlan_locators(metadata_project_1$uuid, data_type = "relative_abundance")
 metaphlan_profiles <- loadMetagenomicData(mpa_files_cache)
@@ -99,6 +103,8 @@ mpa_raw <- cbind(as.data.frame(rowData(metaphlan_profiles)) %>% rownames_to_colu
 dir.create("../Data/metaphlan_profiles/project-1", recursive = TRUE, showWarnings = FALSE)
 write_tsv(mpa_raw, "../Data/metaphlan_profiles/project-1/metaphlan4_data.tsv")
 
+
+# wrangle metaphlan4 data
 mpa4_wrangled_taxonomy_mpa <- assay(metaphlan_profiles) %>%
   as.data.frame() %>% 
   rownames_to_column("clade_name") %>% 
@@ -137,7 +143,8 @@ splitByRanks(project1.tse) %>%
 ```{r}
 splitByRanks(project1.tse) %>% 
   lapply(assay) %>% 
-  lapply(apply, 1, function(x) sum(x > 0)) %>% lapply(summary)
+  lapply(apply, 1, function(x) sum(x > 0)) %>% 
+  sapply(summary)
 ```
 
 
@@ -424,7 +431,11 @@ diff_abund_age_genotype_no12mo <- maaslin3(
   formula = ~ age.fct + genotype, 
   output = output_directories.list$maaslin_tmpdir, 
   min_prevalence = 0.05, 
-  transform = "LOG"
+  transform = "LOG",
+  # do not standardize continuous metadata variables in the model
+    standardize = FALSE, 
+    plot_associations = FALSE,
+    verbosity = "ERROR"
 )
 
 diff_abund_age_genotype_no12mo_clean <- list(abundance = diff_abund_age_genotype_no12mo$fit_data_abundance$results, prevalence = diff_abund_age_genotype_no12mo$fit_data_prevalence$results) %>% 
@@ -740,7 +751,11 @@ diff_abund_ASO.vs.WT_age2 <- maaslin3(
   formula = ~ genotype, 
   output = output_directories.list$maaslin_tmpdir, 
   min_prevalence = 0.05, 
-  transform = "LOG"
+  transform = "LOG",
+  # do not standardize continuous metadata variables in the model
+    standardize = FALSE, 
+    plot_associations = FALSE,
+    verbosity = "ERROR"
 )
 
 diff_abund_ASO.vs.WT_age2_clean <- list(abundance = diff_abund_ASO.vs.WT_age2$fit_data_abundance$results, prevalence = diff_abund_ASO.vs.WT_age2$fit_data_prevalence$results) %>% 
@@ -769,7 +784,11 @@ diff_abund_ASO.vs.WT_age5 <- maaslin3(
   formula = ~ genotype, 
   output = output_directories.list$maaslin_tmpdir, 
   min_prevalence = 0.05, 
-  transform = "LOG"
+  transform = "LOG",
+  # do not standardize continuous metadata variables in the model
+    standardize = FALSE, 
+    plot_associations = FALSE,
+    verbosity = "ERROR"
 )
 
 diff_abund_ASO.vs.WT_age5_clean <- list(abundance = diff_abund_ASO.vs.WT_age5$fit_data_abundance$results, prevalence = diff_abund_ASO.vs.WT_age5$fit_data_prevalence$results) %>% 
@@ -822,13 +841,99 @@ kbl(intersectMatrix) %>%
   kable_styling()
 ```
 
+## Does alpha diversity correlate with motor performance?
+
+To be done
+
+## Overview of motor performance variables in relation microbiome
+
+Adjusting for age and genotype
+
+```{r, fig.height=8, fig.width=10}
+motor_performance_variables <- c("Time.to.cross.challenge.beam..s.", "Adhesive.removal..s.", "Time.to.descend.Pole..s.", "Errors.on.beam.crossing..n.")
+
+lapply(motor_performance_variables, function(motorVar){
+  ggplot(as.data.frame(colData(project1_no_12Months.tse)), aes(x = age.fct, y = eval(parse(text = motorVar)), color = genotype)) + 
+  geom_point(position = position_jitterdodge(jitter.width = 0.2)) +
+  geom_boxplot(show.legend = FALSE, outliers = FALSE, alpha = 0.5) + 
+  scale_color_manual(values = ggsci::pal_aaas()(5)[c(5,2)]) +
+    stat_compare_means(method = "wilcox", show.legend = FALSE) +
+  labs(
+    x = "Age (months)",
+    y = "motor performance",
+    color = "Genotype",
+    title = motorVar
+  )
+}) %>% ggarrange(plotlist = ., common.legend = TRUE)
+```
+
+```{r}
+bpparam.ga <- BiocParallel::MulticoreParam(workers = 8)
+
+maaslin3_motor_performance_adj_genotype.list <- BiocParallel::bplapply(motor_performance_variables, function(motorVar){
+  tmp <- maaslin3(
+    input_data = project1_no_12Months.tse,
+    formula = as.formula(paste0(" ~ ", motorVar, " + genotype + age.fct")), 
+    transform = "LOG",
+     output = output_directories.list$maaslin_tmpdir, 
+    # do not standardize continuous metadata variables in the model
+    standardize = FALSE, 
+    plot_associations = FALSE,
+    verbosity = "ERROR"
+  )
+  
+  tmp_annotated <- list(
+      abundance = tmp$fit_data_abundance$results %>% filter(metadata == motorVar),
+      prevalence = tmp$fit_data_abundance$results %>% filter(metadata == motorVar)
+    ) %>% 
+      lapply(function(x) {
+    taxonomy_info <- as.data.frame(rowData(project1_5months.tse))
+    taxonomy_info_subset <- taxonomy_info[,1:which(colnames(taxonomy_info) == params$tax_level)]
+    colnames(taxonomy_info_subset)[ncol(taxonomy_info_subset)] <- "feature"
+    
+    return(dplyr::full_join(taxonomy_info_subset, x, by = "feature") %>% 
+             arrange(qval_individual))}
+    )
+  
+  return(
+    tmp_annotated
+  )
+}, BPPARAM = bpparam.ga) %>% 
+  set_names(motor_performance_variables)
+```
+
+```{r}
+maaslin3_motor_performance_adj_genotype.list %>% 
+  lapply("[[", "abundance") %>% 
+  lapply(filter, qval_individual < 0.1) %>% 
+  lapply("[[", "feature") %>%
+  fromList() %>%
+  upset()
+```
+
+```{r}
+maaslin3_motor_performance_adj_genotype.list %>% 
+  lapply("[[", "abundance") %>% 
+  lapply(filter, qval_individual < 0.1) %>% 
+  lapply("[", "feature") %>% 
+  bind_rows() %>% 
+  group_by(feature) %>% 
+  tally() %>%
+  set_names(c(params$tax_level, "Freq")) %>% 
+  filter(Freq > 1) %>% 
+  dplyr::left_join(rowData(project1.tse) %>% as.data.frame(), by = params$tax_level) %>% 
+  arrange(desc(Freq)) %>% 
+  kbl() %>% 
+  kable_styling()
+```
+
 # Next steps
 
   - Some overlap in beta-diversity and heatmap. Do mice with microbiomes closer to WT show better motor performances?
   - Which mice were littermates 
   - What to do with WT aged 12 months?
   - ...
-  
+
 # Session Info
 
 ```{r}
